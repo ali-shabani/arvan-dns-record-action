@@ -1,5 +1,7 @@
 import * as core from '@actions/core'
-import { wait } from './wait'
+import { getInput } from './get-input'
+import { ArvanDNSRecord } from './arvan-dns-record'
+import { isEqual } from 'lodash'
 
 /**
  * The main function for the action.
@@ -7,20 +9,34 @@ import { wait } from './wait'
  */
 export async function run(): Promise<void> {
   try {
-    const ms: string = core.getInput('milliseconds')
+    const { apiKey, domain, records } = await getInput()
 
-    // Debug logs are only output if the `ACTIONS_STEP_DEBUG` secret is true
-    core.debug(`Waiting ${ms} milliseconds ...`)
+    const restApi = new ArvanDNSRecord({ apiKey, domain })
 
-    // Log the current timestamp, wait, then log the new timestamp
-    core.debug(new Date().toTimeString())
-    await wait(parseInt(ms, 10))
-    core.debug(new Date().toTimeString())
+    for (const record of records) {
+      const response = await restApi.get({
+        search: record.name,
+        type: record.type
+      })
 
-    // Set outputs for other workflow steps to use
-    core.setOutput('time', new Date().toTimeString())
+      const found = response.data.find(item => item.name === record.name)
+
+      if (found) {
+        if (isEqual(found.value, record.value)) {
+          core.info(`skipped record ${record.name} (already up to date)`)
+          continue
+        }
+
+        await restApi.update(record, found.id)
+        core.info(`updated record ${record.name}`)
+      } else {
+        await restApi.create(record)
+        core.info(`created record ${record.name}`)
+      }
+    }
   } catch (error) {
-    // Fail the workflow run if an error occurs
     if (error instanceof Error) core.setFailed(error.message)
+    if (error instanceof Response)
+      core.setFailed(`request failed with status ${error.status}`)
   }
 }
