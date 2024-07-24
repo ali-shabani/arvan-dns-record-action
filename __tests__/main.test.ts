@@ -6,84 +6,110 @@
  * variables following the pattern `INPUT_<INPUT_NAME>`.
  */
 
+import * as input from '../src/get-input'
+
+import { run } from '../src/main'
 import * as core from '@actions/core'
-import * as main from '../src/main'
-
-// Mock the action's main function
-const runMock = jest.spyOn(main, 'run')
-
-// Other utilities
-const timeRegex = /^\d{2}:\d{2}:\d{2}/
+import { ArvanDNSRecord } from '../src/arvan-dns-record'
 
 // Mock the GitHub Actions core library
-let debugMock: jest.SpiedFunction<typeof core.debug>
-let errorMock: jest.SpiedFunction<typeof core.error>
-let getInputMock: jest.SpiedFunction<typeof core.getInput>
+let infoMock: jest.SpiedFunction<typeof core.info>
 let setFailedMock: jest.SpiedFunction<typeof core.setFailed>
-let setOutputMock: jest.SpiedFunction<typeof core.setOutput>
 
-describe('action', () => {
+let getInputMock: jest.SpiedFunction<typeof input.getInput>
+
+const arvanGetMock = jest.fn()
+const arvanCreateMock = jest.fn()
+const arvanUpdateMock = jest.fn()
+
+const testRecord = {
+  name: 'test',
+  type: 'a' as const,
+  value: { ip: '192.168.1.1' },
+  ttl: 120,
+  cloud: false,
+  upstream_https: 'auto' as const
+}
+
+jest.mock('../src/arvan-dns-record')
+
+describe('run function', () => {
+  const mockArvanDNSRecord = ArvanDNSRecord as jest.Mock
+
   beforeEach(() => {
     jest.clearAllMocks()
 
-    debugMock = jest.spyOn(core, 'debug').mockImplementation()
-    errorMock = jest.spyOn(core, 'error').mockImplementation()
-    getInputMock = jest.spyOn(core, 'getInput').mockImplementation()
+    infoMock = jest.spyOn(core, 'info').mockImplementation()
     setFailedMock = jest.spyOn(core, 'setFailed').mockImplementation()
-    setOutputMock = jest.spyOn(core, 'setOutput').mockImplementation()
-  })
 
-  it('sets the time output', async () => {
-    // Set the action's inputs as return values from core.getInput()
-    getInputMock.mockImplementation(name => {
-      switch (name) {
-        case 'milliseconds':
-          return '500'
-        default:
-          return ''
-      }
+    getInputMock = jest.spyOn(input, 'getInput').mockImplementation(async () =>
+      Promise.resolve({
+        apiKey: 'test-api-key',
+        domain: 'example.com',
+        records: [testRecord]
+      })
+    )
+
+    getInputMock.mockResolvedValue({
+      apiKey: 'test-api-key',
+      domain: 'example.com',
+      records: [testRecord]
     })
 
-    await main.run()
-    expect(runMock).toHaveReturned()
-
-    // Verify that all of the core library functions were called correctly
-    expect(debugMock).toHaveBeenNthCalledWith(1, 'Waiting 500 milliseconds ...')
-    expect(debugMock).toHaveBeenNthCalledWith(
-      2,
-      expect.stringMatching(timeRegex)
-    )
-    expect(debugMock).toHaveBeenNthCalledWith(
-      3,
-      expect.stringMatching(timeRegex)
-    )
-    expect(setOutputMock).toHaveBeenNthCalledWith(
-      1,
-      'time',
-      expect.stringMatching(timeRegex)
-    )
-    expect(errorMock).not.toHaveBeenCalled()
+    mockArvanDNSRecord.mockImplementation(() => ({
+      get: arvanGetMock,
+      create: arvanCreateMock,
+      update: arvanUpdateMock
+    }))
   })
 
-  it('sets a failed status', async () => {
-    // Set the action's inputs as return values from core.getInput()
-    getInputMock.mockImplementation(name => {
-      switch (name) {
-        case 'milliseconds':
-          return 'this is not a number'
-        default:
-          return ''
-      }
+  it('skip existing records successfully', async () => {
+    arvanGetMock.mockResolvedValue({
+      data: [{ name: 'test', id: '123', value: { ip: '192.168.1.1' } }]
     })
+    arvanUpdateMock.mockReturnValueOnce(Promise.resolve())
 
-    await main.run()
-    expect(runMock).toHaveReturned()
+    await run()
 
-    // Verify that all of the core library functions were called correctly
-    expect(setFailedMock).toHaveBeenNthCalledWith(
-      1,
-      'milliseconds not a number'
+    expect(infoMock).toHaveBeenCalledWith(
+      'skipped record test (already up to date)'
     )
-    expect(errorMock).not.toHaveBeenCalled()
+  })
+
+  it('updates existing records successfully', async () => {
+    arvanGetMock.mockResolvedValue({
+      data: [{ name: 'test', id: '123' }]
+    })
+    arvanUpdateMock.mockReturnValueOnce(Promise.resolve())
+
+    await run()
+
+    expect(arvanUpdateMock).toHaveBeenCalledWith(testRecord, '123')
+    expect(infoMock).toHaveBeenCalledWith('updated record test')
+  })
+
+  it('creates new records successfully', async () => {
+    arvanGetMock.mockResolvedValue({ data: [] })
+    arvanCreateMock.mockReturnValueOnce(Promise.resolve())
+    await run()
+
+    expect(arvanCreateMock).toHaveBeenCalledWith(testRecord)
+    expect(infoMock).toHaveBeenCalledWith('created record test')
+  })
+
+  it('handles API errors during record update', async () => {
+    arvanGetMock.mockRejectedValueOnce(new Error('API ERROR'))
+
+    await run()
+
+    expect(setFailedMock).toHaveBeenCalledWith('API ERROR')
+  })
+
+  it('handles unexpected errors', async () => {
+    getInputMock.mockRejectedValue(new Error('Unexpected error'))
+
+    await run()
+
+    expect(setFailedMock).toHaveBeenCalledWith('Unexpected error')
   })
 })
